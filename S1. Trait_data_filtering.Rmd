@@ -8,12 +8,10 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_knit$set(root.dir = 'X:/g2fcompetition2022') #set to the current working directory
-
 ```
 
 ```{r}
 library(tidyverse)
-
 ```
 
 Read in data, remove all local checks and any hybrids missing from vcf.
@@ -37,7 +35,6 @@ df2 = df2 %>%
     Stand_per_area = Stand_Count_plants / Plot_Area_ha,
     id = 1:n() #make an index for observations for filtering later
   )
-
 ```
 
 Check Stand_Count_plants within Env.
@@ -47,7 +44,6 @@ year.mns = group_by(df2, Env) %>%
 
 no.data = year.mns %>% filter(is.na(Stand_Count_plants))  
 no.data
-
 ```
 
 set the count for these Env mannually based on previous years or personal communications.
@@ -69,7 +65,6 @@ year.mns = group_by(df2, Env) %>%
 
 no.data = year.mns %>% filter(is.na(Yield_Mg_ha))  
 no.data
-
 ```
 
 Plot the relationship between Yield and stand over all years.
@@ -80,7 +75,6 @@ yield.stand = ggplot(df2, aes(x = Stand_per_area, y = Yield_Mg_ha)) +
   theme_bw()
 yield.stand
 #ggsave(yield.stand, filename = "yield.stand.png", width = 15, height = 15, units = "cm")
-
 ```
 
 Now filter. First filter by Stand_Count_plants.
@@ -122,7 +116,6 @@ stand.plot + geom_point(data = outliers.both, colour = "magenta", size = 0.5) +
 #Remove all of the rows where the stand count is an outlier. 
 df2 <- df2[!(df2$id %in% outliers.both$id), ]
 #remove 1704 observations -> 129729 observations remain
-
 ```
 
 Filter for Yield_Mg_ha.
@@ -163,7 +156,6 @@ yield.plot + geom_point(data = outliers.both, colour = "magenta", size = 0.5) +
 #Remove all of the rows where yield is an outlier.
 df2 <- df2[!(df2$id %in% outliers.both$id),]
 #remove 741 observations -> 128988 observations remain
-
 ```
 
 ```{r}
@@ -172,6 +164,5 @@ df2 <- df2[!is.na(df2$Yield_Mg_ha), ]
 df2 <- df2[, colnames(df2) != c('id', 'Stand_per_area')]
 
 write.csv(df2, file = "./1_Training_Trait_Data_2014_2021_filtered.csv", row.names = FALSE, quote = FALSE)
-
 ```
 
