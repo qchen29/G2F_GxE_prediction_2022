@@ -1,0 +1,177 @@
+---
+title: "Analysis of G2F Trait Data"
+author: "Qiuyue Chen"
+date: "December 1, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'X:/g2fcompetition2022') #set to the current working directory
+
+```
+
+```{r}
+library(tidyverse)
+
+```
+
+Read in data, remove all local checks and any hybrids missing from vcf.
+```{r}
+df <- read.csv("./Training_Data/1_Training_Trait_Data_2014_2021.csv")
+#Totally 136012 observations
+
+Hybrids <- read.csv("./Training_Data/All_hybrid_names_info.csv")
+
+df2 <- df[df$Hybrid %in% Hybrids[Hybrids$vcf == "TRUE", 'Hybrid'], ]
+#Currently 131433 observations
+colnames(df2)
+```
+
+Convert some columns to factor for plotting.
+```{r}
+df2 = df2 %>%
+  mutate(
+    Env = as.factor(Env),
+    #Field_Location = as.factor(Field_Location),
+    Stand_per_area = Stand_Count_plants / Plot_Area_ha,
+    id = 1:n() #make an index for observations for filtering later
+  )
+
+```
+
+Check Stand_Count_plants within Env.
+```{r}
+year.mns = group_by(df2, Env) %>%
+  summarise(Stand_Count_plants = mean(Stand_Count_plants, na.rm = T))
+
+no.data = year.mns %>% filter(is.na(Stand_Count_plants))  
+no.data
+
+```
+
+set the count for these Env mannually based on previous years or personal communications.
+```{r}
+df2[df2$Env == "MNH1_2016", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "MNH1_2018", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "NEH1_2015", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "NEH4_2015", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "TXH2_2018", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "TXH4_2019", 'Stand_Count_plants'] <- 70
+df2[df2$Env == "WIH3_2020", 'Stand_Count_plants'] <- 70
+```
+
+
+Check distribution of yield within Env.
+```{r}
+year.mns = group_by(df2, Env) %>%
+  summarise(Yield_Mg_ha = mean(Yield_Mg_ha, na.rm = T)) 
+
+no.data = year.mns %>% filter(is.na(Yield_Mg_ha))  
+no.data
+
+```
+
+Plot the relationship between Yield and stand over all years.
+```{r}
+yield.stand = ggplot(df2, aes(x = Stand_per_area, y = Yield_Mg_ha)) +
+  geom_point(size = 0.3, alpha = 0.2, colour = 'green') +
+  ggtitle("Relationship between Yield and Stand_per_area") +
+  theme_bw()
+yield.stand
+#ggsave(yield.stand, filename = "yield.stand.png", width = 15, height = 15, units = "cm")
+
+```
+
+Now filter. First filter by Stand_Count_plants.
+```{r}
+#identify outliers as 2.5*IQR and/or as above/below 30% and plot them
+stand.plot = ggplot(df2, aes(x = Env, y = Stand_Count_plants)) +
+  geom_boxplot(outlier.size = 1) +
+  ggtitle('Distribution of Stand_Count_plants within each Env') + 
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 1) +
+  theme(legend.position = "bottom", legend.key.size = unit(0.15, 'cm'), legend.text = element_text(size = 5), 
+  axis.text.x= element_text(angle = 60, hjust = 1, colour = "black", size = 5)) 
+
+outliers = group_by(df2, Env) %>% 
+  summarise(Mean.std = mean(Stand_Count_plants, na.rm=T), 
+            IQR.std = IQR(Stand_Count_plants, na.rm=T)) %>%
+  mutate(top.iqr = Mean.std + 2.5*IQR.std,
+         bot.iqr = Mean.std - 2.5*IQR.std, 
+         top.perc = Mean.std*1.3,
+         bot.perc = Mean.std*0.7)
+
+outliers.iqr = merge(outliers, df2, by = "Env", all = T) %>%
+  filter(Stand_Count_plants < bot.iqr | Stand_Count_plants > top.iqr)
+
+outliers.perc = merge(outliers, df2, by = "Env", all = T) %>%
+  filter(Stand_Count_plants < bot.perc | Stand_Count_plants > top.perc)
+
+outliers.both = rbind(outliers.iqr, outliers.perc) %>% 
+  filter(duplicated(.)) #keep only rows that are duplicated in both!
+
+#stand.plot + geom_point(data = outliers.iqr, colour = "red", size = 0.5) +
+#    ggtitle("Outliers based on 2.5 IQR")
+
+#stand.plot + geom_point(data = outliers.perc, colour = "green", size = 0.5) +
+#    ggtitle("Outliers based on percentage of mean")
+
+stand.plot + geom_point(data = outliers.both, colour = "magenta", size = 0.5) +
+    ggtitle("Outliers based on percentage of mean AND IQR")
+
+#Remove all of the rows where the stand count is an outlier. 
+df2 <- df2[!(df2$id %in% outliers.both$id), ]
+#remove 1704 observations -> 129729 observations remain
+
+```
+
+Filter for Yield_Mg_ha.
+```{r}
+yield.plot = ggplot(df2, aes(x = Env, y = Yield_Mg_ha)) +
+  geom_boxplot(outlier.size = 1) +
+  ggtitle('Distribution of Yield_Mg_ha within each Env') + 
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 1) +
+  theme(legend.position = "bottom", legend.key.size = unit(0.15, 'cm'), legend.text = element_text(size = 5), 
+  axis.text.x= element_text(angle = 60, hjust = 1, colour = "black", size = 5)) 
+
+outliers = group_by(df2, Env) %>% 
+  summarise(Mean.std = mean(Yield_Mg_ha, na.rm=T), 
+            IQR.std = IQR(Yield_Mg_ha, na.rm=T)) %>%
+  mutate(top.iqr = Mean.std + 2.5*IQR.std,
+         bot.iqr = Mean.std - 2.5*IQR.std, 
+         top.perc = Mean.std*1.3,
+         bot.perc = Mean.std*0.7)
+
+outliers.iqr = merge(outliers, df2, by = "Env", all = T) %>%
+  filter(Yield_Mg_ha < bot.iqr | Yield_Mg_ha > top.iqr)
+
+outliers.perc = merge(outliers, df2, by = "Env", all = T) %>%
+  filter(Yield_Mg_ha < bot.perc | Yield_Mg_ha > top.perc)
+
+outliers.both = rbind(outliers.iqr, outliers.perc) %>% 
+  filter(duplicated(.)) #keep only rows that are duplicated in both!
+
+#yield.plot + geom_point(data = outliers.iqr, colour = "red", size = 0.5) +
+#    ggtitle("Outliers based on 2.5 IQR")
+
+#yield.plot + geom_point(data = outliers.perc, colour = "green", size = 0.5) +
+#    ggtitle("Outliers based on percentage of mean")
+
+yield.plot + geom_point(data = outliers.both, colour = "magenta", size = 0.5) +
+    ggtitle("Outliers based on percentage of mean AND IQR")  
+	
+#Remove all of the rows where yield is an outlier.
+df2 <- df2[!(df2$id %in% outliers.both$id),]
+#remove 741 observations -> 128988 observations remain
+
+```
+
+```{r}
+#Remove all of the rows where yield is missing. remove 5783 observations -> 123205 observations remain
+df2 <- df2[!is.na(df2$Yield_Mg_ha), ]
+df2 <- df2[, colnames(df2) != c('id', 'Stand_per_area')]
+
+write.csv(df2, file = "./1_Training_Trait_Data_2014_2021_filtered.csv", row.names = FALSE, quote = FALSE)
+
+```
+
