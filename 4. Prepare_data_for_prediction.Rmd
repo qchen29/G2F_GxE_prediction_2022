@@ -251,9 +251,7 @@ summary(Emiss2)
 ```
 
 No data are missing in EC. But it turns out that many environments are completely missing from EC, so when we later merge with trait data, they are lost. 
-
 A major problem is that two of them are in the test set! IAH1_2022 and NCH1_2022!
-
 For these cases, all we can do is generate mean EC values at those locations over the other available years.
 ```{r}
 NCH1.mean.EC = apply(EC.sub[grepl("NC", EC.sub$Env), 2:ncol(EC.sub)], 2, mean)
@@ -339,6 +337,7 @@ Just for kicks, plot the unadjusted vs adjusted environment effects:
 plot(env.fx.df$yield, env.fx.adj.df$yield)
 ```
 The adjustments are small, that's probably a good thing. Let's use the adjusted environment means and select the 200 EC variables with lower p-values.
+
 ```{r}
 EC.sub.mn = merge(env.fx.adj.df, EC.sub, by = "Env") #164 environments in test set with both EC variables and yield mean
 pvalEC = function(x, dt = EC.sub.mn){
@@ -382,17 +381,12 @@ Dmat = as.matrix(yield.EC.geno[,..Dcols])
 Emat = as.matrix(yield.EC.geno[,..EC100])
 ```
 
-#############
-testing different ways of building the GxE matrices
+##testing different ways of building the GxE matrices
 most were too slow or memory hogging
-#############
 
 To save some memory, do this step in ten parts, each time doing 10% of the interaction variables and writing to disk the intermediate file.
-  
 This is made harder because we are generated new columns, rather than new rows, of the data set. We cannot easily concatenate files by columns.  (Maybe paste command in linux will do this?)
-  
 Perhaps it will work to write the transposed matrix to disk, concatenate the ten transpose files using command line operations, then see if we can read it all back in. Finally, we need to transpose last time, perhaps this function will work?: wgcna::transposeBigData()
-
 For the moment, let's skip the transposing step and write out the matrices in the desired orientation, then we can see if paste command in linux will work to concatenate by columns. Make function to generate the column products
 ```{r}
 make_interactions = function(col, mat1 = Emat, mat2 = Dmat, cnames1 = colnames(Emat)){
