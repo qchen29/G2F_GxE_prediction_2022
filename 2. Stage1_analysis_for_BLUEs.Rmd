@@ -1,0 +1,472 @@
+---
+title: "G2F 2014 - 2021 Trait Data Stage 1 Analysis: Individual Environments"
+author: "Jim Holland, Qiuyue Chen"
+date: "12/08/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'X:/g2fcompetition2022')
+```
+
+Get libraries.
+```{r}
+library(asreml)
+library(tidyverse)
+```
+
+Initiate some global values.  
+```{r}
+max.ar1 = 0.75  #max.ar1 sets the limit on absolute value of spatial correlations
+nit = 30  #default number of iterations for each asreml call
+covars = '+ stand_lin_cov + stand_quad_cov'
+```
+
+Get the data.
+```{r}
+g2f = read.csv("./1_Training_Trait_Data_2014_2021_filtered.csv") 
+colnames(g2f)
+```
+
+Convert some columns to factor or int type.
+```{r}
+g2f = g2f %>%
+  mutate(
+    Rep = as.factor(Replicate),
+    Block = as.factor(Block),
+    Hybrid = as.factor(Hybrid),
+    Range = as.integer(Range),
+    Pass = as.integer(Pass),
+    Env = as.factor(Env),
+    Experiment = as.factor(Experiment)
+  )
+```
+
+Which environments have no yield data?
+```{r}
+no.yield.data = g2f %>% group_by(Env) %>% 
+  summarize(NoYieldData = all(is.na(Yield_Mg_ha))) %>%
+  filter(NoYieldData)
+no.yield.data
+```
+Each of these environments has some trait data but not yield data.
+
+Subset the data set to drop these environments.
+```{r}
+g2f = g2f %>% filter(!Env %in% no.yield.data$Env)
+```
+
+Make empty lists to hold results for each environment - trait combination.
+```{r}
+trait.results.list = list()
+error.list = list() #list to hold information on environment-trait combinations that had convergence problems
+skip.list = list() #list to hold information on environment-trait combinations that were skipped due to limited data
+```
+
+Make a data frame with each combination of Env and Year in the data set. We apply stage 1 analyses to individual Env - Year combinations. For now just doing yield. Could set up a loop to also run it for different traits (but that's for some other time....)
+```{r}
+env.exp.df = g2f %>% group_by(Year, Env) %>%
+  slice(1) %>%
+  select(Year, Env)
+
+trait.list = c('Yield_Mg_ha', 'Grain_Moisture', 'Twt_kg_m3', 'Pollen_DAP_days', 'Silk_DAP_days', 'Plant_Height_cm', 'Ear_Height_cm')
+```
+
+Make a function to pass in fixed, random, and residual model terms and a data frame.
+Fit the asreml model and return a list including:
+convergence T/F boolean,
+model fit object,
+BIC,
+hybrid predictions.
+Note that we have used na.action = "include" for both missing X and missing Y. This is because the spatial models will fail if the grid is not "complete" for both X and Y. One drawback is that we have a very small number of plots with no stand count, and they will be set to 0 on the stand covariates, which is at least reasonable because stand covariates are already centered at 0.
+```{r}
+fitMod = function(fixed, random = NULL, residual = NULL, df){
+  #fixed is a string that will be turned into an R formula Y ~ fixed terms
+  #random is a string to create a random term for asreml model, NULL means no random term
+  #residual is a term for residual, NULL means to fit default residual
+  #df is a data frame
+ 
+  if (is.null(residual) & is.null(random)){
+	model = tryCatch(asreml(fixed = as.formula(fixed), 
+                          data = df, maxit = nit,
+                          na.action = na.method(y = "include", x = "include"),
+                          trace=F),
+            error = function(x) return(NULL))
+				 } else if (is.null(residual) & ! is.null(random)){
+      model = tryCatch(asreml(fixed = as.formula(fixed), 
+                              random = as.formula(random), 
+                              data = df, maxit = nit,
+                              na.action = na.method(y = "include", x = "include"),
+                              trace = F),
+               error = function(x) return(NULL))
+			   } else if (!is.null(residual) & is.null(random)){
+          model = tryCatch(asreml(fixed = as.formula(fixed), 
+                                  residual = as.formula(residual), 
+                                  data = df, maxit = nit,
+                                  na.action = na.method(y = "include", x = "include"),
+                                  trace = F),
+                   error = function(x) return(NULL))
+					} else {
+                     model = tryCatch(asreml(fixed = as.formula(fixed), 
+                                             random = as.formula(random), 
+                                             residual = as.formula(residual), 
+                                             data = df, maxit = nit,
+                                             na.action = na.method(y = "include", x = "include"),
+                                             trace = F),
+                              error = function(x) return(NULL))
+					 } #end model fit
+
+  #right here check if model crashes and is NULL
+  #in which case, return a list of NULL objects
+  if (is.null(model)){return(list(NULL, NULL))}
+  
+  #check if spatial correlations are out of bounds and fix them if so
+  #otherwise they can cause failure in prediction
+  if (!is.null(residual)){
+   cor.components = grep(".cor$", names(model$vparameters), value = T)
+   check.cor = any(abs(model$vparameters[names(model$vparameters) %in% cor.components]) > max.ar1) 
+   } else {
+    check.cor = F
+	}
+  
+  if (check.cor){
+    #print(paste0("updating model for ", env, trait))
+    #print("AR1 correlations exceed maximum, fixing at max.ar1")
+    model.sv = update(model, start.values = T)$vparameters.table
+    model.sv[model.sv$Component %in% cor.components & abs(model.sv$Value) > max.ar1, 'Constraint'] = 'F'
+    model.sv[model.sv$Component %in% cor.components & model.sv$Value > max.ar1, 'Value'] = max.ar1
+    model.sv[model.sv$Component %in% cor.components & model.sv$Value < -max.ar1, 'Value'] = -max.ar1
+    
+    #update model by fixing the spatial correlations in bounds
+    model = tryCatch(asreml(fixed = as.formula(fixed),
+                      random = as.formula(random),
+                      residual = as.formula(residual), 
+                      data = df, 
+                      maxit = (nit + 5),
+                      R.param = model.sv,
+                      na.action = na.method(y = "include", x = "include"),
+                      trace = F),
+                     error = function(x) return(NULL))
+  }
+  
+  #get the predictions from mod
+  if (is.null(model)) {return(list(NULL, NULL))} else{
+  preds = tryCatch(predict(model, classify = "Hybrid", present = "Hybrid"),
+                error = function(x) return(NULL))
+						   }
+  
+  #if model converges but prediction fails, get the BLUEs (without any stats) as the intercept plus effect
+  if (is.null(preds)){
+    fixed.coefs = coefficients(model)$fixed
+    mu = fixed.coefs[length(fixed.coefs)] #last one is mu
+    betas = fixed.coefs[1:(length(fixed.coefs) - 1)]
+    rnames = rownames(fixed.coefs)[1:(length(fixed.coefs) - 1)]
+    rnames = gsub("Hybrid_", "", rnames)
+    preds = list(avsed = NA,
+                 pvals = data.frame(Hybrid = rnames, predicted.value = mu + betas, std.error = NA, status = "C")) #C stands for 'constructed'
+  }
+
+  return(list(model, preds))
+}
+```
+
+Make an outer function that does all the various model checking and construction work, passing the model fitting to modelFit each time.
+```{r}
+findBestMod = function(year, env, trait){
+#year=2018
+#env="DEH1_2018"
+#trait="Yield_Mg_ha"
+  cat(paste("Year", year, "Environment", env, "Trait", trait, "\n", " "))
+    df = g2f %>% filter(Env == env) 
+    df = df[! is.na(df[[trait]]),]
+    df = droplevels(df)
+
+    #do some QC checks 
+    if (nrow(df) < 30) {skip.list[[paste0(env, "_", trait)]] = "<30 observations"; return(list(NA, NA, NA, NA))} #if total observations < 30, skip
+    if (var(df[[trait]]) == 0) {skip.list[[paste0(env, "_", trait)]] = "No trait variation"; return(list(NA, NA, NA, NA))} #if no variance in trait, skip
+    #check if at least 20 df are available to estimate residual variance (ignoring possibility of fitting covariates and blocks)
+    dfe = df %>% group_by(Hybrid) %>% summarise(N = n()) %>% filter(N > 1) %>% mutate(dfe = N - 1) %>% summarise(sum(dfe))
+    
+    #select if blocks or reps are part of design at this environment
+    if (length(unique(df$Rep)) == 1) {
+      if (length(unique(df$Block) > 1)) {random = "~ Block"} else {random = NULL}
+      } else {
+      if ((length(unique(df$Block)) <= length(unique(df$Rep))) | (dfe < 40)) {random = '~ Rep '} else {random = '~ Rep + Block:Rep'} #if dfe < 40 df, do not include block effects
+    } 
+
+    #if there are multiple experiments within the environment, fit the experiment main effect as fixed
+    #in many cases, we have Hybrids replicated ACROSS experiments, so they are cross-classified
+    exp.effect = length(unique(df$Experiment)) > 1
+    if (exp.effect){
+	  fixed = paste(trait, '~ Experiment + Hybrid')
+	  
+	  if(random == "~ Block") {random = "~ Block:Experiment"}
+	  if(random == "~ Rep") {random = "~ Rep:Experiment"}
+	  if(random == "~ Rep + Block:Rep") {random = "~ Rep:Experiment + Block:Rep:Experiment"}	 
+	  
+	  if(length(unique(df$Experiment)) * length(unique(df$Rep)) == length(unique(df$Block))) {random = "~ Rep:Experiment"} #to deal with the following four Env, fit random = "~ Rep:Experiment + Block:Rep:Experiment" will cause error due to singularities.
+#Env	Experiment.n	Rep.n	Block.n
+#DEH1_2018	2	2	4
+#IAH4_2018	2	2	4
+#NCH1_2018	2	2	4
+#WIH2_2018	2	2	4
+	   
+	} else {fixed = paste(trait, '~ Hybrid')}
+
+        
+    #create stand linear and quadratic covariates
+    df$stand_lin_cov = as.numeric(scale(df$Stand_Count_plants))
+    df$stand_quad_cov = (df$stand_lin_cov)^2
+    #for yield, compare models with and without stand covariates and random blocking structures
+    #select best model
+    #the stand covariates are orthogonal, so we can just fit one model with both at the same time, 
+    #then check their p-values
+    if (! is.na(var(df$stand_lin_cov, na.rm = T))){
+    if (trait == "Yield_Mg_ha" & var(df$stand_lin_cov, na.rm = T) > 0.001) {
+      fixed = paste(fixed, covars)
+      mod.obj = fitMod(fixed = fixed, random = random, df = df)
+      mod = mod.obj[[1]]
+      
+      #check if either or both covariates are significant at p = 0.05
+      Ftests = wald(mod, denDF = "numeric")$Wald
+      fixed.sig = rownames(Ftests[(Ftests[,'Pr'] < 0.05) & (! is.na(Ftests[,'denDF'])),])
+      covars.sig = fixed.sig[fixed.sig %in% c('stand_lin_cov', 'stand_quad_cov')]
+      if (length(covars.sig) == 0) covars.sig = '' else covars.sig = paste('+', covars.sig, collapse = ' ')
+      #now covars.sig consists only of the significant covariate(s)
+      #update fixed
+      fixed = paste(trait, '~ Hybrid', covars.sig)
+      }  
+    } 
+    #end of covariate selection, or set fixed effect model for non-yield traits
+    
+    ####Current best model is the base model with units variance  
+    best.mod.obj = fitMod(fixed = fixed, random = random, df = df)
+    #make a copy of the best model at this point
+    #because the spatial error correlation models are more likely to crash, especially during prediction
+    #in which case we can default back to the best model with units variance
+    simple.mod.obj = best.mod.obj 
+    
+    #check if simple base model throws errors in asreml
+    #a sign that it is irredeemable and should be skipped
+    if (any(unlist(lapply(best.mod.obj, is.null)))) {
+      error.list[[paste(env, trait)]] = c(Env = env, Trait = trait, Converge = FALSE, Message = "Simple model crashed in ASReml")
+      return(list(NA, NA, NA, NA))}
+    
+    best.mod = best.mod.obj[[1]]
+    #BIC = ln(n)*k - 2*logL, asreml manual uses n = number of residual degrees of freedom, not total observations; k is the number of variance parameters in the model
+    best.bic = summary(best.mod)$bic #(log(best.mod$nedf)*(length(best.mod$vparameters)))-(2*best.mod$loglik)
+    best.r = 'units'
+    nugget = F
+    #local.exps = as.character(unique(df$Experiment))
+    #num.exps = length(local.exps)
+
+####FIND THE BEST RESIDUAL VARIANCE STRUCTURE IF THERE IS RANGE AND PASS INFORMATION  
+  #only if we have enough df for reasonable estimation 
+if (dfe >= 20) {
+    #and if we have range/pass info 
+    if (!(any(is.na(df$Range)) | any(is.na(df$Pass)))) {
+      rstructs = c('ar1v(Range):ar1(Pass)', 'idv(Range):ar1(Pass)', 'ar1(Range):idv(Pass)')
+      
+      #for asreml-R need to augment the data to make a complete grid of range and pass
+      #in the past I made them numeric and 'filled in' any missing ranges or passes.
+      #but that causes problems when there are many missing ranges/passes
+      #instead can make a complete grid representing all combinations of only the range/pass values that exist
+        #min.range = min(as.numeric(df$Range), na.rm = T)
+        #min.pass = min(as.numeric(df$Pass), na.rm = T)
+        #shift the range and pass values down to start at 1 each
+        #this avoids making a huge empty grid when the row/col indices start at high values
+        #df$Range = df$Range - min.range + 1
+        #df$Pass = df$Pass - min.pass + 1
+        #sometimes users give us pass values that increase by 2, catch those cases and modify
+        #if (all(is.na(df[df$Pass%%2 == 0, trait]))) {df$Pass = (df$Pass%/%2) + 1}
+        #now compute the max values for the adjusted Range and Pass info
+        #max.range = max(as.numeric(df$Range), na.rm = T)
+        #max.pass = max(as.numeric(df$Pass), na.rm = T)
+        #aug.df = expand.grid(Experiment = exp, Range = 1:max.range, Pass = 1:max.pass)
+        aug.df = expand.grid(Range = unique(df$Range), Pass = unique(df$Pass))
+        df = merge(df, aug.df, by = c("Range", "Pass"), all = T)
+
+      #Need to fill in missing values for factors that are fit in model, 
+      #reset model factors to factors
+      df = mutate(df, 
+                   Rep = factor(ifelse(is.na(Rep),1, Rep)), 
+                   Block = factor(ifelse(is.na(Block),1, Block)),
+                   Range = factor(Range),
+                   Pass = factor(Pass),
+                   stand_lin_cov = ifelse(is.na(stand_lin_cov),0, stand_lin_cov),
+                   stand_quad_cov = ifelse(is.na(stand_quad_cov),0, stand_quad_cov),
+                   Hybrid = as.factor(ifelse(is.na(Hybrid),"MISSING", as.character(Hybrid))))
+      
+      for (r in rstructs){
+        name = paste(env, trait, fixed, random, r)
+        #print(name)
+        mod2.obj = fitMod(fixed = fixed, random = random, residual = paste('~', r), df = df)
+        mod2 = mod2.obj[[1]]
+        if (!is.null(mod2)) {
+          curr.bic = summary(mod2)$bic #(log(mod2$nedf)*(length(mod2$vparameters))) - (2*mod2$loglik)
+          if (curr.bic < best.bic){
+            best.mod.obj = mod2.obj
+            best.mod = mod2
+            best.bic = curr.bic
+            best.r = r}
+        }
+      }
+      
+      #if best model includes a spatial correlation, then also try adding nugget variance to that
+      if (best.r != "units") {
+        #cat(paste("Environment", env, "Trait", trait, "\n", " "))
+        #print("Add units to best spatial model")
+        if (is.na(random)) newrand = "random = ~ units" else newrand = paste(random, "+ units")
+        units.mod.obj = fitMod(fixed, newrand, paste('~', best.r), df = df)
+        units.mod = units.mod.obj[[1]]
+        if (! any(unlist(lapply(units.mod.obj, is.null)))){ #next bit only executes if units.mod actually works
+        units.bic = summary(units.mod)$bic #(log(best.mod$nedf)*(length(units.mod$vparameters))) - (2*units.mod$loglik)
+        #best.mod is updated to units model if it has lower BIC than current best.mod
+        if (units.bic < best.bic) {
+          best.mod.obj = units.mod.obj
+          best.mod = units.mod
+          best.bic = units.bic
+          nugget = T
+          random = newrand } # end if(length(units.mod) > 1) condition
+        }
+      } #end of nugget test
+    } #end spatial model fitting
+  } #end if(dfe > 20) loop
+      
+    if (! best.mod$converge){
+      error.list[[paste(env, trait)]] = c(Env = env, Trait = trait, Converge = best.mod$converge, Message = best.mod$errtxt)
+    }
+
+    #after trying the spatial correlation models, check to see if either the model fit or prediction returned null
+    # in which case, back up to the best units residual model -> simple.mod
+    if (any(unlist(lapply(best.mod.obj, is.null)))){
+      best.mod.obj = simple.mod.obj
+      best.mod = best.mod.obj[[1]]
+    }
+      
+    
+    #Get the Wald tests for fixed effects
+    F.df = as.data.frame(wald(best.mod))
+    F.df$Factor = rownames(F.df)
+    F.df$Year = year
+    F.df$Env = env
+    F.df$Trait = trait
+
+    #For the best model, get BLUEs for Hybrids at the current environment
+    BLUEs = best.mod.obj[[2]]$pvals
+    BLUEs$Year = year
+    BLUEs$Env = env
+    BLUEs$Trait = trait
+
+    #cat(paste("computing heritability", env, trait, "\n", " "))
+    #For the best model, write a version with random hybrids and estimate heritability using Cullis method
+    if (is.na(random)) random.term = "~ Hybrid" else random.term = paste(random, '+ Hybrid')
+    rand.mod.obj = fitMod(fixed = sub("Hybrid", "1", fixed, fixed = T),
+                          random = random.term,
+                          residual = paste("~", best.r), 
+                          df = df)
+    #occasionally, a best.mod won't fit as a random.mod
+    #Maybe because ar1 correlations are going to 1 and it crashes before
+    #we can fix them at maxar1 values?
+    #Anyway, simplest thing is to just fit a reduced model with units residual
+    if (any(unlist(lapply(rand.mod.obj, is.null)))) {
+      random.red = sub("+ units", "+ Hybrid", random, fixed = T)
+      rand.mod.obj = fitMod(fixed = sub("Hybrid", "1", fixed, fixed = T),
+                           random = random.red,
+                           df = df)
+    }
+
+    rand.mod.pred = rand.mod.obj[[2]]
+    avSED = rand.mod.pred$avsed
+    rand.mod = rand.mod.obj[[1]]
+    d<-as.data.frame(summary(rand.mod)$varcomp)
+    d$Term = rownames(summary(rand.mod)$varcomp)
+    Vg<-d[d$Term=="Hybrid", 'component']
+    H.mean = 1 - ((avSED**2)/(2*Vg)) #Heritability of hybrid means
+    #Plot basis heritability not quite right for spatial models, but compute it anyway
+    #Verr is ALSO incorrect here for spatial models because "variance" term gets fixed at 1, and the variance components in Range and Pass directions should be used. I left this computation in here, but Anna is fixing it in another script post-hoc using the outputted variance components.
+    Verr = sum(d[grep("^units!R$|^Range:Pass!Range$|^Range:Pass!Pass$|^Range:Pass!Range!var$", d$Term),"component"])
+    if (is.na(Verr)) Verr = 0
+    if (nugget) Verr = sum(d[d$Term == "units", "component"], Verr)
+    H.plot = Vg/(Vg + Verr) 
+    
+    #Save the variance components, etc. into a data frame, then add to results list
+    results.df = data.frame(
+      Year = year,
+      Env = env,
+      Trait = trait,
+      Fixed = fixed,
+      Random = random,
+      R.structure = best.r,
+      Verr = Verr,
+      H.plot = H.plot,
+      H.mean = H.mean)
+    
+    vcomps.df = summary(rand.mod)$varcomp %>%
+      mutate(Year = year,
+             Env = env,
+             Trait = trait,
+             Factor = rownames(.))
+    
+    return(list(BLUEs, results.df, F.df, vcomps.df))
+}
+```
+
+Execute the findBestMod function for each environment, compiling results into a list named result.list
+```{r include = F}
+result.list= apply(env.exp.df, 1, function(x) findBestMod(x[1], x[2], "Yield_Mg_ha"))
+```
+
+Creat directory for output
+```{r}
+if (!dir.exists("Stage1_analysis")){
+  dir.create("Stage1_analysis")
+}else{
+  print("dir exists")
+}
+```
+
+Unpack the results into separate data lists
+```{r}
+blues.list = lapply(X = result.list, FUN = "[[", ... = 1)
+blues.df = do.call(rbind, blues.list)
+write.csv(blues.df, file = "./Stage1_analysis/G2F 2021 Stage 1 yield BLUEs no filtering.csv", row.names = F, quote = F)
+
+results.list = lapply(X = result.list, FUN = "[[", ... = 2)
+results.df = do.call(rbind, results.list)
+write.csv(results.df, file = "./Stage1_analysis/G2F 2021 individual environment yield heritability no filtering.csv", row.names = F, quote = F)
+
+F.list = lapply(X = result.list, FUN = "[[", ... = 3)
+F.df = do.call(rbind, F.list)
+write.csv(F.df, file = "./Stage1_analysis/G2F 2021 Stage 1 Ftests no filtering.csv", row.names = F, quote = F)
+
+vc.list = lapply(X = result.list, FUN = "[[", ... = 4)
+vc.df = do.call(rbind, vc.list)
+write.csv(vc.df, file = "./Stage1_analysis/G2F 2021 Stage 1 variance components no filtering.csv", row.names = F, quote = F)
+```
+
+Plot histogram of stage 1 heritability by year
+```{r}
+ggplot(results.df[!is.na(results.df$H.mean),], aes(x = H.mean)) +
+  geom_histogram() +
+  facet_wrap(facets = ~ Year) +
+  theme_minimal()
+```
+
+Environments with heritability < 0.10:
+```{r}
+results.df %>% filter(H.mean < 0.1)
+```
+
+Did any environments fail on analysis and return NA?
+```{r}
+results.df[is.na(results.df$H.mean),]
+```
+
+check the error list for any errors
+```{r}
+error.df = do.call(rbind, error.list)
+error.df
+```
+
