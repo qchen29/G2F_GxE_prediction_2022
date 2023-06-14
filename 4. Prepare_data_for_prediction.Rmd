@@ -153,7 +153,6 @@ meta.test = meta.test %>%
   select(Env, City, starts_with("Weather_Station_L")) %>%
   rename(Latitude = contains("Latitude"),
          Longitude = contains("Longitude"))
-
 ```
 
 Need to fill in coordinates for missing locations:
@@ -191,7 +190,6 @@ missing.site.coords = missing.site.coords %>%
   filter(!is.na(Latitude.mn))
 
 missing.site.coords = rbind(missing.site.coords, hand.coords) 
-
 missing.site.coords = merge(missing.sites, missing.site.coords) %>%
   select(-City)
 ```
@@ -306,7 +304,6 @@ Write out this version of the data frame to use in computing environment means
 fwrite(yield.EC.geno, file = "./Prediction_Datasets/Yield_Geno_EC.csv")
 ```
 
-
 Compute environment means
 ```{r}
 mean.mod = lm(yield ~ as.factor(Env), data = yield.EC.geno)
@@ -314,7 +311,6 @@ env.fx = mean.mod$coefficients[-c(1)]
 names(env.fx) = sub("as.factor(Env)", "", names(env.fx), fixed = T)
 env.fx.df = data.frame(Env = names(env.fx), yield = env.fx)
 ```
-
 
 Compute environment means adjusted for hybrid effects
 ```{r}
@@ -381,7 +377,7 @@ Dmat = as.matrix(yield.EC.geno[,..Dcols])
 Emat = as.matrix(yield.EC.geno[,..EC100])
 ```
 
-##testing different ways of building the GxE matrices
+# testing different ways of building the GxE matrices
 most were too slow or memory hogging
 
 To save some memory, do this step in ten parts, each time doing 10% of the interaction variables and writing to disk the intermediate file.
