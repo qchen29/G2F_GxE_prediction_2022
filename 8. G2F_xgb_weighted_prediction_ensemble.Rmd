@@ -1,0 +1,129 @@
+---
+title: "G2F_xgb_predictions"
+author: "Jim Holland"
+date: "2023-01-13"
+output: html_document
+---
+
+Based on xgboost grid search, select some parameters, refit the xgb on the full training data set and predict 2022 values. Check correlations among predictions from different models.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(tidyverse)
+#library(xgboost)
+```
+
+# Get metadata and submission template
+```{r}
+template = read.csv("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Testing_Data/1_Submission_Template_2022.csv")
+
+g2f = fread(file = "Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Jim/G2F_EC477_geno500_ge1k.csv")
+metaCols = names(g2f)[1:8]
+#make boolean vectors of test observations
+valid = g2f$Year == 2022
+valid.meta = setDF(copy(g2f))[valid,c(metaCols)] %>%
+  select(Env, Hybrid)
+```
+
+# Get predictions from first model
+```{r}
+preds1 = read.table("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Weighted_predictions/xgb_wt_pred2_10_0.2_0.1_0.25")
+```
+
+```{r}
+hist(apply(preds1, 2, var))
+```
+What are the lowest variance values
+```{r}
+sort(apply(preds1, 2, var))[1:10]
+```
+Probably reasonable
+
+# Get predictions from 2nd model
+```{r}
+preds2 = read.table("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Weighted_predictions/xgb_wt_pred2_10_0.3_0.5_0.75")
+```
+
+```{r}
+hist(apply(preds2, 2, var))
+```
+
+What are the lowest variance values
+```{r}
+sort(apply(preds2, 2, var))[1:10]
+```
+
+# Get predictions from 3rd model
+```{r}
+preds3 = read.table("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Weighted_predictions/xgb_wt_pred2_10_0.5_0.5_0.5")
+```
+
+```{r}
+hist(apply(preds3, 2, var))
+```
+
+What are the lowest variance values
+```{r}
+sort(apply(preds3, 2, var))[1:10]
+```
+
+# Get predictions from 4th model
+```{r}
+preds4 = read.table("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Weighted_predictions/xgb_wt_pred2_100_0.2_0.25_0.25")
+```
+
+```{r}
+hist(apply(preds4, 2, var))
+```
+
+What are the lowest variance values
+```{r}
+sort(apply(preds4, 2, var))[1:10]
+```
+
+# Make the ensemble as average of all
+
+Maybe we should just make an average of all as an ensemble:
+```{r}
+ensemble = apply(do.call(cbind, list(preds1, preds2, preds3, preds4)), 1, mean)
+hist(ensemble)
+```
+
+# Create a submission file for these predictions:
+We need to put our predictions is the correct order.
+```{r}
+valid.meta$Yield_Mg_ha = ensemble
+template$Yield_Mg_ha = NULL
+submit1 = left_join(template, valid.meta) %>% 
+  select(Env, Hybrid, Yield_Mg_ha)
+
+#check that order hasn't changed
+all(template$Env == submit1$Env)
+```
+
+Another check on order
+```{r}
+all(template$Hybrid == submit1$Hybrid)
+```
+OK, order is good.
+
+Check how these predictions compare to the unweighted predictions
+```{r}
+unwt = read.csv("Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Ensemble_predictions/xgb_4model_ensemble_predictions.csv")
+plot(unwt$Yield_Mg_ha, submit1$Yield_Mg_ha)
+```
+They're quite similar
+```{r}
+cor(unwt$Yield_Mg_ha, submit1$Yield_Mg_ha)
+```
+Check the mean predicted yields by environment
+```{r}
+submit1 %>% group_by(Env) %>%
+  summarize(mean.yield = mean(Yield_Mg_ha))
+```
+
+```{r}
+write.csv(submit1, "Q:/.shortcut-targets-by-id/14BgjSlCN-5Nt_TAwg9-2nM6ZZrbkSh4y/G2F_Final_Competition_Data/Weighted_predictions/xgb_wt_4model_ensemble_predictions.csv", 
+          row.names = F, quote = F)
+```
