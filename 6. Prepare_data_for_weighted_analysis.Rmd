@@ -1,0 +1,289 @@
+---
+title: "Preparing weighted analysis data set"
+author: "Jim Holland, Qiuyue Chen"
+date: "2023-01-14"
+output: html_document
+---
+
+# Outline
+Idea to weight predictions in xgboost model:  
+
+We have two sources of weighting to consider:  
+1. variance of predictions from stage 1 models.  
+this variance really concerns precision of BLUE differences within environments  
+so low heritability within an environment means low weighting  
+BUT the mean of that environment is still probably an accurate estimate of the environment mean
+so we want to consider this weighting, but it should not be the only source of weighting information  
+note: we have some NA values here that need to be dealt with  
+  
+2. we also want to consider the importance of observations relative to predicting new environment means as well as hybrid-env values  
+one simple way to do this is to use our full set of predictors  
+measure the multivariate distance between training and test observations  
+compute the mean distance of each training record to the test set  
+use the inverse of this distance or convert it to a similarity measure as a weighting  
+  
+3. then how to balance the two weightings?  
+one reasonable ratio is the proportion of g + ge variance within environments to among environment variance in training set  
+probably need to partition out total year variance in this model  
+convert the two vectors of weights to standard variance (but all values must be positive)  
+then apply this ratio to the weights in part 1 to get mean weight.  
+  
+Here is the output from this simple anova model on full training set:  
+yield !WEIGHT wt !DISP 1 ~ mu !r Env  Hybrid + Env.Hybrid  
+  
+  
+                         Wald F statistics  
+Source of Variation           NumDF     DenDF     F-inc              P-inc   
+ mu                               1             3328.66  
+  
+ Model_Term                     Order     Sigma         Sigma     Z_ratio  %C  
+ Env                              217   5.56080       5.56080       10.38   0 P      
+ Hybrid                          4418  0.529381      0.529381       36.49   0 P    
+ Env.Hybrid                    958706  0.711006      0.711006       79.63   0 P    
+ Residual_units                 82141   1.00000       1.00000        0.00  
+  
+So ratio is (G + GE)/E = 0.22  
+  
+(and FYI, ratio of G/GE = 0.74, more GxE than G main effect variance)  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'X:/g2fcompetition2022')
+#knitr::opts_knit$set(root.dir = '/Volumes/qchen295/g2fcompetition2022')
+library(data.table)
+library(tidyverse)
+```
+
+# Get data
+Read in full training plus test data sets, deal with NA values in weights
+```{r}
+g2f = fread(file = "./Prediction_Datasets/G2F_EC477_geno500_ge1k.csv")
+metaCols = names(g2f)[1:8]
+#make boolean vectors of train and test observations
+tr = g2f$Year < 2022
+valid = g2f$Year == 2022
+x = copy(g2f) #need to make deep copies because otherwise data.table assignments are by reference and you will be in a world of hurt
+x = x[,c(metaCols):=NULL]
+y = copy(g2f)
+y = y[, yield]
+
+xtrain = copy(x)[tr,]
+xtest = copy(x)[valid,]
+ytrain = copy(y)[tr]
+```
+
+# Deal with missing weights
+Check which environments are missing weights in data set (some issue in the prediction run)
+```{r}
+problenvs = g2f %>% 
+  filter(tr) %>% 
+  select(Env, weight) %>%
+  group_by(Env) %>%
+  summarize(N.miss.wt = sum(is.na(weight))) %>%
+  filter(N.miss.wt > 0)
+```
+
+Get results on within-site heritability for yield for each training environment
+```{r}
+h2s = read.csv("./Stage1_analysis/G2F 2021 individual environment yield heritability no filtering.csv")
+hist(h2s$H.mean)
+```
+predict mn weight based on env mean yield and h2
+```{r}
+mean.wt = g2f %>% filter(tr) %>%
+  select(Env, weight, yield) %>%
+  group_by(Env) %>%
+  summarize(mean.wt = mean(weight, na.rm = T),
+            mean.yield = mean(yield, na.rm = T))
+
+mean.wt = left_join(mean.wt, h2s, by = "Env") 
+
+sum(is.na(mean.wt$mean.wt))
+```
+Compare the mean weights against heritability and mean yield
+```{r}
+within(mean.wt, plot(H.mean, mean.wt))
+```
+
+```{r}
+within(mean.wt, plot(mean.yield, mean.wt))
+```
+One environment has very high weights, based on its low yields
+```{r}
+mean.wt %>% slice_max(order_by = mean.wt, n = 1)
+```
+Yeah, that's ridiculous. Surely it's because the mean is low and total variation is very small. Let's set it to NA and predict it in line with the other environments.
+```{r}
+mean.wt = mean.wt %>%
+  mutate(mean.wt = ifelse(Env == "ARH2_2016", NA_real_, mean.wt))
+```
+
+Let's try to predict the mean weight at these 7 missing environments
+```{r}
+mod.mn.wt = lm(mean.wt ~ mean.yield + H.mean, data = mean.wt)
+summary(mod.mn.wt)
+```
+Predict the 8 missing values:
+```{r}
+predicted.wts = predict(mod.mn.wt, newdata = mean.wt[is.na(mean.wt$mean.wt),])
+predicted.wts = data.frame(Env = mean.wt[is.na(mean.wt$mean.wt),"Env"], pred.wt = predicted.wts)
+```
+
+Update the full data set with predicted weights where we don't have actual values
+```{r}
+g2f2 = copy(g2f)
+g2f2 = left_join(g2f2, predicted.wts, by = "Env") %>%
+  mutate(weight = ifelse(is.na(weight), pred.wt, weight),
+         weight = ifelse(Env == "ARH2_2016", pred.wt, weight)) %>%
+  select(-pred.wt)
+```
+
+Check to make sure we have the weights OK. Here's the original distribution:
+```{r}
+summary(g2f$weight)
+```
+And now:
+```{r}
+summary(g2f2$weight)
+```
+That looks better. Note that the NA's correspond to the number of test set observations, so this is OK.
+```{r}
+sum(is.na(g2f2[tr,"weight"]))
+```
+Check the weights in the predicted environments:
+```{r}
+g2f2 %>% filter(Env %in% predicted.wts$Env) %>%
+  select(Env, weight) %>%
+  group_by(Env) %>%
+  summarize(mean.wt = mean(weight))
+```
+Looks OK.
+
+# Compute weight based on multivariate similarity (cosine) to test set
+#https://finnstats.com/2021/08/10/how-to-calculate-cosine-similarity-in-r/
+#library(lsa)
+#cosine(matrix)
+#https://stats.stackexchange.com/questions/31565/compute-a-cosine-dissimilarity-matrix-in-r
+# warning - this is super slow. I also ran this on scinet, see those scripts
+```{r}
+#x.mat = as.matrix(x)
+#sim <- x.mat / sqrt(rowSums(x.mat * x.mat))
+#sim <- sim %*% t(sim)
+```
+
+sim is an obs x obs square matrix of similarities based on the columns of the predictors
+let's keep just the rows corresponding to training
+and the cols corresponding to test set
+then average across those columns to get the mean distance
+between each training set obs and the test set
+```{r}
+#sim.tr.test = sim[tr, valid ]
+#print(dim(sim.tr.test))
+```
+```{r}
+#sim.tr.test[1:5, 1:5]
+```
+get the mean similarity between each training set obs and the test set
+```{r}
+#mean.sim = apply(sim.tr.test, 1, mean)
+#read it in from the scinet result
+mean.sim = read.csv("./Prediction_Datasets/G2F_mean_similarity_tr_to_test.csv")
+mean.sim = mean.sim[,2]
+head(mean.sim)
+```
+What is the distribution of these values?
+```{r}
+hist(mean.sim)
+```
+yikes, most of the training set has near zero covariance with the test set, and lots of it has negative covariances!
+```{r}
+summary(mean.sim)
+```
+
+  
+Scale the weighting based on within-environment BLUE precision to near 0 - 1 scale. 
+```{r}
+g2f2$weight_precision = (g2f2$weight - min(g2f2$weight, na.rm = T))/(max(g2f2$weight, na.rm = T) - min(g2f2$weight, na.rm = T))
+summary(g2f2$weight_precision)
+```
+Adjust the zero values upward by some small value (no zero weights allowed)
+```{r}
+g2f2 %>% select(weight_precision) %>%
+  filter(weight_precision > 0 & weight_precision < 0.011) 
+```
+OK, next smallest value to 0 is 0.0107. So let's reset 0 to 0.01
+```{r}
+g2f2 = g2f2 %>% mutate(weight_precision = ifelse(weight_precision == 0, 0.01, weight_precision))
+                  
+summary(g2f2$weight_precision)     
+```
+Also scale the similarity weighting to 0 to 1 range (avoiding exact 0)
+```{r}
+mean.sim.scale = (mean.sim - min(mean.sim))/(max(mean.sim) - min(mean.sim))
+summary(mean.sim.scale)
+```
+What are the almost zero values?
+```{r}
+mean.sim.scale[mean.sim.scale < 0.05]
+```
+```{r}
+mean.sim.scale[mean.sim.scale == 0] = 0.01
+g2f2 = g2f2 %>% mutate(weight_simil = 0)
+g2f2[tr,"weight_simil"] = mean.sim.scale
+g2f2 = g2f2 %>% mutate(weight_simil = ifelse(weight_simil == 0, NA, weight_simil))
+
+hist(g2f2$weight_simil)
+```
+Make sure the weights were applied to all of training set (sorting of rows makes this potentially tricky)
+```{r}
+sum(is.na(g2f2[tr,"weight_precision"]))
+```
+```{r}
+sum(is.na(g2f2[tr,"weight_simil"]))
+```
+Good.
+
+Now construct an index weight that combines the precision and similarity weights.  
+Here we use the ratio of Env variance to (G + GE) variance for yield data.
+```{r}
+#colnames(g2f2)[1:10]
+g2f2 = g2f2 %>%
+  rename(weight.p = std.error,
+         weight.s = status,
+         weight.c = Trait,
+         weight.blue = weight) %>%
+  mutate(weight.p = weight_precision,
+         weight.s = weight_simil,
+         weight.c = (0.22*weight.p) + weight.s) %>%
+  select(-weight_precision, -weight_simil)
+colnames(g2f2)[1:10]
+```
+```{r}
+hist(g2f2$weight.c)
+```
+```{r}
+summary(g2f2$weight.c)
+```
+```{r}
+sum(is.na(g2f2[tr, "weight.c"]))
+```
+All looks good. 
+Write out this version of the data frame for use in xgb models
+```{r}
+fwrite(g2f2, file = "./Prediction_Datasets/G2F_EC477_geno500_ge1k_wt.csv")
+```
+
+
+Also generate data set for larger markers
+```{r}
+D_wt = fread("./Prediction_Datasets/G2F_EC477_geno500_ge1k_wt.csv")
+D_full = fread("./Prediction_Datasets/G2F_FullMarker_EC477_geno1472_ge1k.csv")
+all(D_wt$Hybrid==D_full$Hybrid)
+all(D_wt$Env==D_full$Env)
+all(D_wt$Year==D_full$Year)
+D_full[,4:8] = D_wt[,4:8]
+names(D_full)[4:8] = names(D_wt)[4:8]
+fwrite(D_full, file = "./Prediction_Datasets/G2F_FullMarker_EC477_geno1472_ge1k_wt.csv")
+
+```
+
